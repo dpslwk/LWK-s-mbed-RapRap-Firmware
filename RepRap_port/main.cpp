@@ -60,6 +60,7 @@ int main() {
 // M84  - Disable steppers until next move
 // M85  - Set inactivity shutdown timer with parameter S<seconds>. To disable set zero (default)
 // M92  - Set axis_steps_per_unit - same syntax as G92
+// **M110 - 
 
 //Stepper Movement Variables
 bool direction_x, direction_y, direction_z, direction_e;
@@ -121,7 +122,13 @@ void setup()
 */  
   pc.baud(BAUDRATE);
   pc.printf("start\n\r");
+  pc.printf("%ld\n\r", gcode_LastN);
   t.start();
+  gcode_N = -1;
+  gcode_LastN = -1;
+  pc.printf("After 0\n\r");
+  pc.printf("%ld\n\r", gcode_LastN);
+
 }
 
 
@@ -184,7 +191,7 @@ inline void process_commands()
     if(gcode_N != gcode_LastN+1 && (strstr(cmdbuffer, "M110") == NULL) ) {
     //if(gcode_N != gcode_LastN+1 && !code_seen("M110") ) {   //Hmm, compile size is different between using this vs the line above even though it should be the same thing. Keeping old method.
       pc.printf("Serial Error: Line Number is not Last Line Number+1, Last Line:");
-      pc.printf("%ld\n\r", &gcode_LastN);
+      pc.printf("%ld\n\r", gcode_LastN);
       FlushSerialRequestResend();
       return;
     }
@@ -197,7 +204,7 @@ inline void process_commands()
      
       if( (int)code_value() != checksum) {
         pc.printf("Error: checksum mismatch, Last Line:");
-        pc.printf("%ld\n\r", &gcode_LastN);
+        pc.printf("%ld\n\r", gcode_LastN);
         FlushSerialRequestResend();
         return;
       }
@@ -206,7 +213,7 @@ inline void process_commands()
     else 
     {
       pc.printf("Error: No Checksum with line number, Last Line:");
-      pc.printf("%ld\n\r", &gcode_LastN);
+      pc.printf("%ld\n\r", gcode_LastN);
       FlushSerialRequestResend();
       return;
     }
@@ -219,7 +226,7 @@ inline void process_commands()
     if(code_seen('*'))
     {
       pc.printf("Error: No Line Number with checksum, Last Line:");
-      pc.printf("%ld\n\r", &gcode_LastN);
+      pc.printf("%ld\n\r", gcode_LastN);
       return;
     }
   }
@@ -374,7 +381,7 @@ inline void FlushSerialRequestResend()
   char cmdbuffer[100]="Resend:";
 //  ltoa(gcode_LastN+1, cmdbuffer+7, 10);
 // pc.flush();                              // ***LWK*** mbed has no .flush
-  pc.printf("%s\n\r", &cmdbuffer);
+  pc.printf("%ld\n\r", cmdbuffer);
   ClearToSend();
 }
 
@@ -619,7 +626,7 @@ inline void kill(char debug)
   {
     if(debug == 1) pc.printf("Inactivity Shutdown, Last Line: ");
     if(debug == 2) pc.printf("Linear Move Abort, Last Line: ");
-    pc.printf("%ld\n\r", &gcode_LastN);
+    pc.printf("%d\n\r", &gcode_LastN);
     wait(5000); // 5 Second delay
   }
 }
