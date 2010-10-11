@@ -7,6 +7,11 @@
  * Tonokip's firmware can be found @ http://github.com/tonokip/Tonokip-Firmware
  * LWK's firmware can be found @ http://github.com/dpslwk/LWK-s-mbed-RapRap-Firmware
  *
+ * Thanks to Andy Kirkham on mbed.org for the SerialBuffred Libary
+ * http://mbed.org/users/AjK/libraries/SerialBuffered/lfp8fd
+ *
+ * Thanks to Jason Engelman on mbed.org for the Max6675 Code
+ * http://mbed.org/users/tecnosys/programs/max6675/5ztnc
  *
  ************************************************************/
  
@@ -15,14 +20,20 @@
 #include "configuration.h"
 #include "pins.h"
 #include "ThermistorTable.h"
+#include "SerialBuffered.h"
+#include "max6675.h"
 
-DigitalOut myled(LED1);
+DigitalOut myled1(LED1);
+DigitalOut myled2(LED2);
+DigitalOut myled3(LED3);
+DigitalOut myled4(LED4);
 Timer t;
-Serial pc(USBTX, USBRX);
+//Serial pc (USBTX, USBRX);
+SerialBuffered pc(USBTX, USBRX);
+Serial loggerSerial(p9, p10);
 
-#define max(a,b) ((a)>(b)?(a):(b))
-#define HIGH 1
-#define LOW 0
+
+
 
 
 int main() {
@@ -64,14 +75,14 @@ int main() {
 
 //Stepper Movement Variables
 bool direction_x, direction_y, direction_z, direction_e;
-unsigned long previous_micros=0, previous_micros_x=0, previous_micros_y=0, previous_micros_z=0, previous_micros_e=0, previous_millis_heater;
-unsigned long x_steps_to_take, y_steps_to_take, z_steps_to_take, e_steps_to_take;
+unsigned int previous_micros=0, previous_micros_x=0, previous_micros_y=0, previous_micros_z=0, previous_micros_e=0, previous_millis_heater;
+unsigned int x_steps_to_take, y_steps_to_take, z_steps_to_take, e_steps_to_take;
 float destination_x =0.0, destination_y = 0.0, destination_z = 0.0, destination_e = 0.0;
 float current_x = 0.0, current_y = 0.0, current_z = 0.0, current_e = 0.0;
 float x_interval, y_interval, z_interval, e_interval; // for speed delay
 float feedrate = 1500, next_feedrate;
 float time_for_move;
-long gcode_N, gcode_LastN;
+int gcode_N, gcode_LastN;
 bool relative_mode = false;  //Determines Absolute or Relative Coordinates
 bool relative_mode_e = false;  //Determines Absolute or Relative E Codes while in Absolute Coordinates mode. E is always relative in Relative Coordinates mode.
 
@@ -88,8 +99,9 @@ int target_raw = 0;
 int current_raw;
 
 //Inactivity shutdown variables
-unsigned long previous_millis_cmd=0;
-unsigned long max_inactive_time = 0;
+unsigned int previous_millis_cmd=0;
+unsigned int max_inactive_time = 0;
+
 
 void setup()
 { 
@@ -121,13 +133,15 @@ void setup()
   if(HEATER_0_PIN > -1) pinMode(HEATER_0_PIN,OUTPUT);
 */  
   pc.baud(BAUDRATE);
-  pc.printf("start\n\r");
-  pc.printf("%ld\n\r", gcode_LastN);
+  pc.printf("start\r\n");
+  loggerSerial.baud(BAUDRATE);
+  loggerSerial.printf("start Buffred\r\n");
+//  pc.printf("%ld\r\n", gcode_LastN);
   t.start();
   gcode_N = -1;
   gcode_LastN = -1;
-  pc.printf("After 0\n\r");
-  pc.printf("%ld\n\r", gcode_LastN);
+//  pc.printf("After 0\r\n");
+//  pc.printf("%ld\r\n", gcode_LastN);
 
 }
 
@@ -143,25 +157,33 @@ void loop()
 inline void get_command() 
 { 
 
+//    loggerSerial.printf("g_c:\t");
+    
   if( pc.readable() > 0 ) {
     serial_char = pc.getc();
+    
+    loggerSerial.putc(serial_char);
+    
     if(serial_char == '\n' || serial_char == '\r' || serial_char == ':' || serial_count >= (MAX_CMD_SIZE - 1) ) 
     {
       if(!serial_count) return; //if empty line
       cmdbuffer[serial_count] = 0; //terminate string
       pc.printf("Echo:");
-      pc.printf("%s\n\r", &cmdbuffer[0]);
+      pc.printf("%s\r\n", &cmdbuffer);  // removed [0]
       
       process_commands();
       
+      loggerSerial.printf("\tbak from p_commands\r\n");
+      
       comment_mode = false; //for new command
       serial_count = 0; //clear buffer
-      //pc.printf("ok\n\r"); 
+      //pc.printf("ok\r\n"); 
     }
     else
     {
       if(serial_char == ';') comment_mode = true;
       if(!comment_mode) cmdbuffer[serial_count++] = serial_char; 
+ //     loggerSerial.printf("\tadd\n\r");
     }
   }  
 }
@@ -170,7 +192,7 @@ inline void get_command()
 //#define code_num (strtod(&cmdbuffer[strchr_pointer - cmdbuffer + 1], NULL))
 //inline void code_search(char code) { strchr_pointer = strchr(cmdbuffer, code); }
 inline float code_value() { return (strtod(&cmdbuffer[strchr_pointer - cmdbuffer + 1], NULL)); }
-inline long code_value_long() { return (strtol(&cmdbuffer[strchr_pointer - cmdbuffer + 1], NULL, 10)); }
+inline int code_value_long() { return (strtol(&cmdbuffer[strchr_pointer - cmdbuffer + 1], NULL, 10)); }
 inline bool code_seen(char code_string[]) { return (strstr(cmdbuffer, code_string) != NULL); }  //Return True if the string was found
 
 inline bool code_seen(char code)
@@ -183,15 +205,20 @@ inline bool code_seen(char code)
 
 inline void process_commands()
 {
-  unsigned long codenum; //throw away variable
+  unsigned int codenum; //throw away variable
   
   if(code_seen('N'))
   {
+    loggerSerial.printf("Seen N\t");
     gcode_N = code_value_long();
-    if(gcode_N != gcode_LastN+1 && (strstr(cmdbuffer, "M110") == NULL) ) {
+    loggerSerial.printf("%d\t", gcode_N);
+    loggerSerial.printf("%d\t", gcode_LastN);
+    if(gcode_N != 1+gcode_LastN && (strstr(cmdbuffer, "M110") == NULL) ) {
     //if(gcode_N != gcode_LastN+1 && !code_seen("M110") ) {   //Hmm, compile size is different between using this vs the line above even though it should be the same thing. Keeping old method.
-      pc.printf("Serial Error: Line Number is not Last Line Number+1, Last Line:");
-      pc.printf("%ld\n\r", gcode_LastN);
+      pc.printf("Serial Error: Line Number is not Last Line Number+1, Last Line: ");
+      pc.printf("%d \r\n", gcode_LastN);
+      loggerSerial.printf("%d\t", gcode_N);
+      loggerSerial.printf("%d\t", gcode_LastN);
       FlushSerialRequestResend();
       return;
     }
@@ -204,7 +231,7 @@ inline void process_commands()
      
       if( (int)code_value() != checksum) {
         pc.printf("Error: checksum mismatch, Last Line:");
-        pc.printf("%ld\n\r", gcode_LastN);
+        pc.printf("%d\r\n", gcode_LastN);
         FlushSerialRequestResend();
         return;
       }
@@ -213,7 +240,7 @@ inline void process_commands()
     else 
     {
       pc.printf("Error: No Checksum with line number, Last Line:");
-      pc.printf("%ld\n\r", gcode_LastN);
+      pc.printf("%d\r\n", gcode_LastN);
       FlushSerialRequestResend();
       return;
     }
@@ -226,7 +253,7 @@ inline void process_commands()
     if(code_seen('*'))
     {
       pc.printf("Error: No Line Number with checksum, Last Line:");
-      pc.printf("%ld\n\r", gcode_LastN);
+      pc.printf("%d\r\n", gcode_LastN);
       return;
     }
   }
@@ -259,32 +286,32 @@ inline void process_commands()
         if(z_steps_to_take) z_interval = time_for_move/z_steps_to_take;
         if(e_steps_to_take) e_interval = time_for_move/e_steps_to_take;
         
-        #define DEBUGGING false
+        #define DEBUGGING true
         if(DEBUGGING) {
-          pc.printf("destination_x: "); pc.printf("%f\n\r", &destination_x); 
-          pc.printf("current_x: "); pc.printf("%f\n\r", &current_x); 
-          pc.printf("x_steps_to_take: "); pc.printf("%lu\n\r", &x_steps_to_take); 
-          pc.printf("X_TIME_FOR_MVE: "); pc.printf("%f\n\r", X_TIME_FOR_MOVE); 
-          pc.printf("x_interval: "); pc.printf("%f\n\r", &x_interval); 
-          pc.printf("\n\r");
-          pc.printf("destination_y: "); pc.printf("%f\n\r", &destination_y); 
-          pc.printf("current_y: "); pc.printf("%f\n\r", &current_y); 
-          pc.printf("y_steps_to_take: "); pc.printf("%lu\n\r", &y_steps_to_take); 
-          pc.printf("Y_TIME_FOR_MVE: "); pc.printf("%f\n\r", Y_TIME_FOR_MOVE); 
-          pc.printf("y_interval: "); pc.printf("%f\n\r", &y_interval); 
-          pc.printf("\n\r");
-          pc.printf("destination_z: "); pc.printf("%f\n\r", &destination_z); 
-          pc.printf("current_z: "); pc.printf("%f\n\r", &current_z); 
-          pc.printf("z_steps_to_take: "); pc.printf("%lu\n\r", &z_steps_to_take); 
-          pc.printf("Z_TIME_FOR_MVE: "); pc.printf("%f\n\r", Z_TIME_FOR_MOVE); 
-          pc.printf("z_interval: "); pc.printf("%f\n\r", &z_interval); 
-          pc.printf("\n\r");
-          pc.printf("destination_e: "); pc.printf("%f\n\r", &destination_e); 
-          pc.printf("current_e: "); pc.printf("%f\n\r", &current_e); 
-          pc.printf("e_steps_to_take: "); pc.printf("%lu\n\r", &e_steps_to_take); 
-          pc.printf("E_TIME_FOR_MVE: "); pc.printf("%f\n\r", E_TIME_FOR_MOVE); 
-          pc.printf("e_interval: "); pc.printf("%f\n\r", &e_interval); 
-          pc.printf("\n\r");
+          pc.printf("destination_x: "); pc.printf("%f\r\n", &destination_x); 
+          pc.printf("current_x: "); pc.printf("%f\r\n", &current_x); 
+          pc.printf("x_steps_to_take: "); pc.printf("%u\r\n", &x_steps_to_take); 
+          pc.printf("X_TIME_FOR_MVE: "); pc.printf("%f\r\n", X_TIME_FOR_MOVE); 
+          pc.printf("x_interval: "); pc.printf("%f\r\n", &x_interval); 
+          pc.printf("\r\n");
+          pc.printf("destination_y: "); pc.printf("%f\r\n", &destination_y); 
+          pc.printf("current_y: "); pc.printf("%f\r\n", &current_y); 
+          pc.printf("y_steps_to_take: "); pc.printf("%u\r\n", &y_steps_to_take); 
+          pc.printf("Y_TIME_FOR_MVE: "); pc.printf("%f\r\n", Y_TIME_FOR_MOVE); 
+          pc.printf("y_interval: "); pc.printf("%f\r\n", &y_interval); 
+          pc.printf("\r\n");
+          pc.printf("destination_z: "); pc.printf("%f\r\n", &destination_z); 
+          pc.printf("current_z: "); pc.printf("%f\r\n", &current_z); 
+          pc.printf("z_steps_to_take: "); pc.printf("%u\r\n", &z_steps_to_take); 
+          pc.printf("Z_TIME_FOR_MVE: "); pc.printf("%f\r\n", Z_TIME_FOR_MOVE); 
+          pc.printf("z_interval: "); pc.printf("%f\r\n", &z_interval); 
+          pc.printf("\r\n");
+          pc.printf("destination_e: "); pc.printf("%f\r\n", &destination_e); 
+          pc.printf("current_e: "); pc.printf("%f\r\n", &current_e); 
+          pc.printf("e_steps_to_take: "); pc.printf("%u\r\n", &e_steps_to_take); 
+          pc.printf("E_TIME_FOR_MVE: "); pc.printf("%f\r\n", E_TIME_FOR_MOVE); 
+          pc.printf("e_interval: "); pc.printf("%f\r\n", &e_interval); 
+          pc.printf("\r\n");
         }
         
         linear_move(x_steps_to_take, y_steps_to_take, z_steps_to_take, e_steps_to_take); // make the move
@@ -323,7 +350,7 @@ inline void process_commands()
         break;
       case 105: // M105
         pc.printf("T:");
-        pc.printf("%f\n\r", analog2temp(TEMP_0_PIN.read()) ); 
+        pc.printf("%f\r\n", analog2temp(TEMP_0_PIN.read()) ); 
         if(!code_seen('N')) return;  // If M105 is sent from generated gcode, then it needs a response.
         break;
       case 109: // M109 - Wait for heater to reach target.
@@ -333,7 +360,7 @@ inline void process_commands()
           if( (t.read_ms()-previous_millis_heater) > 1000 ) //Print Temp Reading every 1 second while heating up.
           {
             pc.printf("T:");
-            pc.printf("%f\n\r", analog2temp(TEMP_0_PIN.read()) ); 
+            pc.printf("%f\r\n", analog2temp(TEMP_0_PIN.read()) ); 
             previous_millis_heater = t.read_ms(); 
           }
           manage_heater();
@@ -378,17 +405,17 @@ inline void process_commands()
 
 inline void FlushSerialRequestResend()
 {
-  char cmdbuffer[100]="Resend:";
-//  ltoa(gcode_LastN+1, cmdbuffer+7, 10);
+  char cmdbuffer[100]="rs ";
+  itoa(gcode_LastN+1, cmdbuffer+3);
 // pc.flush();                              // ***LWK*** mbed has no .flush
-  pc.printf("%ld\n\r", cmdbuffer);
+  pc.printf("%s\r\n", cmdbuffer);
   ClearToSend();
 }
-
+ 
 inline void ClearToSend()
 {
   previous_millis_cmd = t.read_ms();
-  pc.printf("ok\n\r"); 
+  pc.printf("ok\r\n"); 
 }
 
 inline void get_coordinates()
@@ -432,7 +459,7 @@ inline void get_coordinates()
   if(feedrate > max_feedrate) feedrate = max_feedrate;
 }
 
-void linear_move(unsigned long x_steps_remaining, unsigned long y_steps_remaining, unsigned long z_steps_remaining, unsigned long e_steps_remaining) // make linear move with preset speeds and destinations, see G0 and G1
+void linear_move(unsigned int x_steps_remaining, unsigned int y_steps_remaining, unsigned int z_steps_remaining, unsigned int e_steps_remaining) // make linear move with preset speeds and destinations, see G0 and G1
 {
   //Determine direction of movement
   if (destination_x > current_x) X_DIR_PIN.write(!INVERT_X_DIR);
@@ -626,9 +653,40 @@ inline void kill(char debug)
   {
     if(debug == 1) pc.printf("Inactivity Shutdown, Last Line: ");
     if(debug == 2) pc.printf("Linear Move Abort, Last Line: ");
-    pc.printf("%d\n\r", &gcode_LastN);
+    pc.printf("%d\r\n", &gcode_LastN);
     wait(5000); // 5 Second delay
   }
 }
 
 inline void manage_inactivity(char debug) { if( (t.read_ms()-previous_millis_cmd) >  max_inactive_time ) if(max_inactive_time) kill(debug); }
+
+/* itoa:  convert n to characters in s */
+ /* reverse:  reverse string s in place */
+ void reverse(char s[])
+ {
+     int i, j;
+     char c;
+ 
+     for (i = 0, j = strlen(s)-1; i<j; i++, j--) {
+         c = s[i];
+         s[i] = s[j];
+         s[j] = c;
+     }
+ }
+
+
+ void itoa(int n, char s[])
+ {
+     int i, sign;
+ 
+     if ((sign = n) < 0)  /* record sign */
+         n = -n;          /* make n positive */
+     i = 0;
+     do {       /* generate digits in reverse order */
+         s[i++] = n % 10 + '0';   /* get next digit */
+     } while ((n /= 10) > 0);     /* delete it */
+     if (sign < 0)
+         s[i++] = '-';
+     s[i] = '\0';
+     reverse(s);
+ }
